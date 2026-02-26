@@ -5,10 +5,10 @@ require('dotenv').config({ path: '/home/ubuntu/threads-bot-news2/.env' });
 const OWN_HANDLE = (process.env.THREADS_OWN_HANDLE || '').replace('@', '').trim();
 if (!OWN_HANDLE) throw new Error('THREADS_OWN_HANDLE is required (.env)');
 const PROFILE = `https://www.threads.com/@${OWN_HANDLE}`;
-const LOG = '/home/ubuntu/threads-bot/threads_publish_full.log';
+const LOG = process.env.THREADS_PUBLISH_LOG || '/home/ubuntu/threads-bot-news2/threads_publish_full.log';
 const POST_TEXT = process.argv.slice(2).join(' ') || `자동 테스트 ${new Date().toISOString()}`;
 const MAX_ATTEMPTS = 2; // 최초 1회 + 실패 시 재시도 1회
-const CDP_URL = process.env.THREADS_CDP_URL || 'http://127.0.0.1:9222/';
+const CDP_URL = process.env.THREADS_CDP_URL || 'http://127.0.0.1:9223/';
 
 fs.writeFileSync(LOG, '');
 const log = (m) => fs.appendFileSync(LOG, `[${new Date().toISOString()}] ${m}\n`);

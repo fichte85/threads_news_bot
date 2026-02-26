@@ -77,6 +77,7 @@ def main():
         env['NODE_PATH'] = node_path
 
     # 실행 경로를 스크립트 위치로 맞춰 모듈 탐색 기준 일치화
+    env['THREADS_PUBLISH_LOG'] = '/home/ubuntu/threads-bot-news2/threads_publish_full.log'
     r = subprocess.run(cmd, cwd='/home/ubuntu/threads-bot-news2', env=env, capture_output=True, text=True)
     print(r.stdout[-400:])
     if r.returncode == 0:

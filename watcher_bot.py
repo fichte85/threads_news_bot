@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, time, datetime, json, requests, subprocess, re, threading
+from pathlib import Path
 from common import DATA, read_jsonl, read_json, write_json, update_json_locked
 
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
@@ -50,8 +51,43 @@ def send(text):
     )
 
 
+def _publish_env_for_news2(cdp_url=None, own_handle=None):
+    """news2 publish용 Node env 재현 + 모듈 경로를 고정해 충돌을 줄인다."""
+    env = os.environ.copy()
+    if cdp_url:
+        env['THREADS_CDP_URL'] = cdp_url
+    if own_handle:
+        env['THREADS_OWN_HANDLE'] = own_handle
+
+    nm_candidates = [
+        '/home/ubuntu/threads-bot/node_modules',
+        '/home/ubuntu/threads-bot-news2/node_modules',
+    ]
+    node_path = env.get('NODE_PATH', '')
+    for p in nm_candidates:
+        if Path(p).exists():
+            node_path = f"{p}:{node_path}" if node_path else p
+            break
+    env['NODE_PATH'] = node_path
+    env['THREADS_PUBLISH_LOG'] = os.getenv('THREADS_PUBLISH_LOG', '/home/ubuntu/threads-bot-news2/threads_publish_full.log')
+    return env
+
+
 def run(cmd):
     r = subprocess.run(['bash', '-lc', cmd], cwd='/home/ubuntu/threads-bot-news2', capture_output=True, text=True, timeout=None)
+    return r.returncode, (r.stdout + '\n' + r.stderr)[-1000:]
+
+
+def run_publish_news2(publish_js, payload, own_handle='', cdp_url='http://127.0.0.1:9223/'):
+    env = _publish_env_for_news2(cdp_url=cdp_url, own_handle=own_handle)
+    r = subprocess.run(
+        ['node', publish_js, payload],
+        cwd='/home/ubuntu/threads-bot-news2',
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=None,
+    )
     return r.returncode, (r.stdout + '\n' + r.stderr)[-1000:]
 
 
@@ -735,11 +771,7 @@ def get_updates():
                     news_handle = os.getenv('NEWS_THREADS_OWN_HANDLE', '').replace('@', '').strip()
                     payload = f"{d.get('title','')}\n\n{d.get('body','')}"
                     cdp_url = os.getenv('NEWS_THREADS_CDP_URL', 'http://127.0.0.1:9223/')
-                    if news_handle:
-                        cmd = f"THREADS_CDP_URL={cdp_url} THREADS_OWN_HANDLE={news_handle} node {publish_js} {repr(payload)}"
-                    else:
-                        cmd = f"THREADS_CDP_URL={cdp_url} node {publish_js} {repr(payload)}"
-                    c, out = run(cmd)
+                    c, out = run_publish_news2(publish_js, payload, own_handle=news_handle, cdp_url=cdp_url)
                     send(f'publish_now exit={c}\n{out[-500:]}')
         elif text.startswith('/mix_on'):
             parts = text.split()
