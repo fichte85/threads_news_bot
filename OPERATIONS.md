@@ -48,7 +48,7 @@
 ## 4) .env 핵심값
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
-- `THREADS_PUBLISH_JS=/home/ubuntu/threads-bot/publish.js`
+- `THREADS_PUBLISH_JS=/home/ubuntu/threads-bot-news2/publish_news2.js`
 - `NEWS_THREADS_OWN_HANDLE=news_fichte`
 - `NEWS_THREADS_CDP_URL=http://127.0.0.1:9223/`
 - `GEN_PROVIDER=gemini`

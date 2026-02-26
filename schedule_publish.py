@@ -40,7 +40,7 @@ def main():
         print('NOT_YET', head['when'])
         return
 
-    publish_js = os.getenv('THREADS_PUBLISH_JS', '/home/ubuntu/threads-bot/publish.js')
+    publish_js = os.getenv('THREADS_PUBLISH_JS', '/home/ubuntu/threads-bot-news2/publish_news2.js')
     news_handle = os.getenv('NEWS_THREADS_OWN_HANDLE', '').replace('@', '').strip()
     draft = head.get('text', '').strip()
     if not draft:

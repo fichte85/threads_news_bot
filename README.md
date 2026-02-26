@@ -47,5 +47,5 @@ python3 watcher_bot.py
 - `data/news2.log`
 
 ## 비고
-- 발행은 `THREADS_PUBLISH_JS`(기존 publish.js)를 호출해 수행.
+- 발행은 `THREADS_PUBLISH_JS`(news2 전용 `publish_news2.js`)를 호출해 수행.
 - 승인(pick)된 항목만 발행됨.

@@ -477,7 +477,7 @@ def get_updates():
                 if not d:
                     send('해당 draft id를 찾지 못했습니다.')
                 else:
-                    publish_js = os.getenv('THREADS_PUBLISH_JS', '/home/ubuntu/threads-bot/publish.js')
+                    publish_js = os.getenv('THREADS_PUBLISH_JS', '/home/ubuntu/threads-bot-news2/publish_news2.js')
                     news_handle = os.getenv('NEWS_THREADS_OWN_HANDLE', '').replace('@', '').strip()
                     payload = f"{d.get('title','')}\n\n{d.get('body','')}"
                     cdp_url = os.getenv('NEWS_THREADS_CDP_URL', 'http://127.0.0.1:9223/')
