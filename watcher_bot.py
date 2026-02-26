@@ -124,9 +124,26 @@ def run_async_job(job_name, cmd, success_cb=None):
     return True, f"{job['label']} 작업을 백그라운드로 시작했어요. 완료되면 자동으로 알림할게요."
 
 
+
+
+def is_blocked_draft_item(d):
+    bad_phrases = [
+        '접속 실패', '접근 실패', '접근 차단', '접근 제한', '오류', '서버 오류', '연결 실패', '로봇 체크',
+        '요청하신 페이지를 찾을 수 없습니다', '모더레이션', 'mod_security', '차단', '서버 오류 발생'
+    ]
+    txt = ((d.get('title') or '') + (d.get('body') or '') + (d.get('text') or '') + (d.get('summary') or '')).lower()
+
+    # Bloomberg 정책(최종):
+    # - Bloomberg + 로봇체크/차단 문구는 운영상 예외로 review/show/showq에서 확인 가능하도록 보존
+    # - 그 외 일반 차단/오류 문구는 기존대로 필터
+    if ('블룸버그' in txt or 'bloomberg' in txt) and any(k in txt for k in ['로봇 체크', 'robot', 'captcha', '차단']):
+        return False
+
+    return any(b in txt for b in bad_phrases)
+
 def pending_drafts():
     rows = read_jsonl(DRAFTS)
-    return [r for r in rows if (r.get('status') or 'draft') == 'draft']
+    return [r for r in rows if (r.get('status') or 'draft') == 'draft' and not is_blocked_draft_item(r)]
 
 
 def hot_map_by_url():
@@ -153,20 +170,35 @@ def archive_pending_drafts():
     return changed
 
 
-def build_news_slots(n):
+def build_news_slots(n, start_from=None):
     # 뉴스는 2시간 간격 고정(정규 슬롯)
-    start = os.getenv('PUBLISH_START', '10:30')
-    sh, sm = map(int, start.split(':'))
-    day = datetime.date.today()
-    out = []
-    for i in range(n):
-        out.append(datetime.datetime.combine(day, datetime.time(sh, sm)) + datetime.timedelta(hours=2 * i))
+    if start_from is None:
+        start = os.getenv('PUBLISH_START', '10:30')
+        sh, sm = map(int, start.split(':'))
+        now = datetime.datetime.now()
+        day = now.date()
+        base = datetime.datetime.combine(day, datetime.time(sh, sm))
+        # 이미 지난 시간대면 다음 날 시작시간부터 잡는다.
+        if base <= now:
+            day = day + datetime.timedelta(days=1)
+            base = datetime.datetime.combine(day, datetime.time(sh, sm))
+    else:
+        if isinstance(start_from, (int, float)):
+            base = datetime.datetime.fromtimestamp(start_from)
+        else:
+            base = start_from
+        # 분/초를 버리고, 다음 즉시 슬롯으로 정렬
+        base = base.replace(second=0, microsecond=0)
+        if datetime.datetime.now() > base:
+            base = base + datetime.timedelta(minutes=1)
+
+    out = [base + datetime.timedelta(hours=2 * i) for i in range(n)]
     return out
 
 
-def merge_with_chat_schedule(news_items, chat_items):
+def merge_with_chat_schedule(news_items, chat_items, start_from=None):
     # news_items/chat_items: [{'id','text','template?'}]
-    news_slots = build_news_slots(len(news_items))
+    news_slots = build_news_slots(len(news_items), start_from=start_from)
     scheduled_news = []
     for it, t in zip(news_items, news_slots):
         scheduled_news.append({
@@ -253,6 +285,13 @@ def insert_chats_into_queue(count=1):
         if not items:
             return q
 
+        # existing chat texts for dedupe
+        existing_chat_texts = {
+            it.get('text', '')
+            for it in items
+            if (it.get('template') or '') == 'chat'
+        }
+
         news = []
         for it in items:
             if (it.get('template') or 'news') == 'chat':
@@ -268,9 +307,9 @@ def insert_chats_into_queue(count=1):
 
         news.sort(key=lambda x: x[0])
         cands = []
-        for i in range(len(news)-1):
+        for i in range(len(news) - 1):
             dt1, it1 = news[i]
-            dt2, it2 = news[i+1]
+            dt2, it2 = news[i + 1]
             gap = dt2 - dt1
             if gap <= datetime.timedelta(minutes=1):
                 continue
@@ -279,11 +318,16 @@ def insert_chats_into_queue(count=1):
         if not cands:
             return q
 
+        # 큰 간격 우선 정렬 후, 호출 이력 커서를 이용해 같은 위치 반복을 피한다.
         cands.sort(key=lambda x: x[0], reverse=True)
-        add = cands[:count]
+        cursor = int(q.get('__chat_insert_cursor', 0) or 0)
+        if cursor < 0:
+            cursor = 0
 
         inserted = 0
-        for _gap, dt, ptxt, ntx in add:
+        for offset in range(count):
+            idx = (cursor + offset) % len(cands)
+            _gap, dt, ptxt, ntx = cands[idx]
             when = dt.replace(second=0, microsecond=0).strftime('%Y-%m-%d %H:%M')
             # 중복 시간 회피
             probe = dt
@@ -294,17 +338,29 @@ def insert_chats_into_queue(count=1):
                 else:
                     break
 
-            ctext = make_chitchat(f"{ptxt[:20]}|{ntx[:20]}")
+            # 같은 텍스트 반복 방지: 슬롯/시점/순번을 시드에 반영
+            base_seed = f"{ptxt[:20]}|{ntx[:20]}|{when}|{idx}|{len(items)}"
+            ctext = make_chitchat(base_seed)
+            retry = 0
+            while ctext in existing_chat_texts and retry < 8:
+                retry += 1
+                ctext = make_chitchat(base_seed + f"|{retry}")
+
             items.append({
                 'id': f'chat_{int(time.time())}_{abs(hash(when)) % 10000000}',
                 'when': when,
                 'text': ctext,
                 'template': 'chat',
             })
+            existing_chat_texts.add(ctext)
             inserted += 1
 
         if inserted:
             items.sort(key=lambda x: x.get('when', '0000-00-00 00:00'))
+            q['__chat_insert_cursor'] = (cursor + inserted) % len(cands)
+        else:
+            q['__chat_insert_cursor'] = cursor
+
         q['items'] = items
         q['__inserted_chats'] = inserted
         return q
@@ -495,7 +551,7 @@ def do_pick(id_csv):
                 'template': 'chat',
             })
 
-    new_batch = merge_with_chat_schedule(news_items, chat_items)
+    new_batch = merge_with_chat_schedule(news_items, chat_items, start_from=datetime.datetime.now())
     chosen_ids = {str(d.get('id')) for d in chosen}
 
     stats = {'added_news': 0, 'added_chat': 0, 'queue_total': 0}
@@ -525,6 +581,8 @@ def do_pick(id_csv):
                 pass
 
         q['items'] = existing + filtered_batch
+        # 큐 재생성/추가 시에는 채팅 삽입 위치 커서를 리셋
+        q['__chat_insert_cursor'] = 0
         stats['added_news'] = sum(1 for it in filtered_batch if str(it.get('id')) in chosen_ids)
         stats['added_chat'] = sum(1 for it in filtered_batch if str(it.get('template') or '') == 'chat')
         stats['queue_total'] = len(q['items'])
@@ -633,9 +691,12 @@ def get_updates():
                 continue
 
         if text in ['/collect_extract', '/collect_news', '/extract_news', '뉴스 수집']:
+            def _cb(code, out):
+                send(f'collect_extract exit={code}\\n{out[-600:]}')
             ok, msg = run_async_job(
                 'collect_extract',
                 JOB_DEFINITIONS['collect_extract']['cmd'],
+                success_cb=_cb,
             )
             send(msg)
         elif text in ['/generate_news', '뉴스생성', '뉴스 생성']:
@@ -671,15 +732,79 @@ def get_updates():
                         f"   미리보기: {preview}..."
                     )
                 lines.append('\n선택: /pick 1,2  (번호 선택 가능)')
-                lines.append('상세보기: /show 1  또는 /show <id>')
+                lines.append('상세보기: /show 1(또는 /showd 1)은 검수목록, /showq 1은 스케줄큐를 봅니다. 전체 요약은 /showq all')
                 send('\n'.join(lines))
-        elif text.startswith('/show '):
+        elif text.startswith('/showd ') or text.startswith('/show '):
             key = text.split(' ', 1)[1].strip()
 
-            # 숫자 입력이면 예약큐 기준으로 먼저 보여줌(/schedule과 번호 일치)
+            d = pending_drafts()
+            q = read_json(QUEUE, {'items': []}).get('items', [])
+
+            # 먼저 draft 기준으로 해석(검수리스트와 번호가 일치하는 UX 우선)
+            target = None
+            target_is_queue = False
             if key.isdigit():
+                i = int(key)
+                if 1 <= i <= len(d):
+                    target = d[i - 1]
+                elif 1 <= i <= len(q):
+                    target = q[i - 1]
+                    target_is_queue = True
+            else:
+                for x in d:
+                    if str(x.get('id')) == key:
+                        target = x
+                        break
+                if not target:
+                    for x in q:
+                        if str(x.get('id')) == key:
+                            target = x
+                            target_is_queue = True
+                            break
+
+            if not target:
+                send('대상을 찾지 못했습니다. /show <번호 또는 draft_id> 또는 /showq <큐번호>로 입력하세요.')
+            elif target_is_queue:
+                t = (target.get('template') or '-').upper()
+                idx = '?'
+                try:
+                    idx = q.index(target) + 1
+                except Exception:
+                    pass
+                send(
+                    f"[QUEUE {idx}] [{t}]\n"
+                    f"id: {target.get('id')}\n"
+                    f"when: {target.get('when')}\n\n"
+                    f"{target.get('text','')}"
+                )
+            else:
+                fmt = (target.get('format') or '-').upper()
+                send(
+                    f"[DRAFT] [{fmt}] {target.get('title','')}\n"
+                    f"id: {target.get('id')}\n"
+                    f"url: {target.get('url','')}\n\n"
+                    f"{target.get('body','')}"
+                )
+        elif text.startswith('/showq'):
+            parts = text.split(' ', 1)
+            key = parts[1].strip() if len(parts) > 1 else ''
+            q = read_json(QUEUE, {'items': []}).get('items', [])
+
+            if key == '' or key == 'all':
+                if not q:
+                    send('예약큐가 비어있습니다.')
+                else:
+                    msg = ['[예약큐 요약]']
+                    for n, it in enumerate(q, 1):
+                        t = (it.get('template') or 'news').upper()
+                        title = it.get('title') or (it.get('text') or '')[:28]
+                        when = it.get('when', '-')
+                        msg.append(f"{n}) [{t}] {when} | {title[:60]}")
+                    msg.append('상세: /showq <번호 or id>')
+                    send('\n'.join(msg))
+                
+            elif key.isdigit():
                 idx = int(key)
-                q = read_json(QUEUE, {'items': []}).get('items', [])
                 if 1 <= idx <= len(q):
                     item = q[idx - 1]
                     t = (item.get('template') or '-').upper()
@@ -689,30 +814,21 @@ def get_updates():
                         f"when: {item.get('when')}\n\n"
                         f"{item.get('text','')}"
                     )
-                    continue
-
-            # 그 외는 draft 기준(id 또는 번호)
-            d = pending_drafts()
-            target = None
-            if key.isdigit():
-                i = int(key)
-                if 1 <= i <= len(d):
-                    target = d[i - 1]
+                else:
+                    send(f'큐 번호 범위 오류: 1~{len(q)}')
             else:
-                for x in d:
-                    if str(x.get('id')) == key:
-                        target = x
+                for item in q:
+                    if str(item.get('id')) == key:
+                        t = (item.get('template') or '-').upper()
+                        send(
+                            f"[QUEUE] [{t}]\n"
+                            f"id: {item.get('id')}\n"
+                            f"when: {item.get('when')}\n\n"
+                            f"{item.get('text','')}"
+                        )
                         break
-            if not target:
-                send('대상을 찾지 못했습니다. /show <큐번호> 또는 /show <draft_id> 로 입력하세요.')
-            else:
-                fmt = (target.get('format') or '-').upper()
-                send(
-                    f"[DRAFT] [{fmt}] {target.get('title','')}\n"
-                    f"id: {target.get('id')}\n"
-                    f"url: {target.get('url','')}\n\n"
-                    f"{target.get('body','')}"
-                )
+                else:
+                    send('큐 항목을 찾지 못했습니다. /showq <큐번호/큐id>')
         elif text.startswith('/pick '):
             send(do_pick(text.split(' ', 1)[1]))
         elif text in ['/schedule', '스케쥴관리']:

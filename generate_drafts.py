@@ -5,7 +5,9 @@ import json
 import requests
 import subprocess
 import re
+from difflib import SequenceMatcher
 import hashlib
+from datetime import datetime, timedelta
 
 from common import DATA, now_iso, read_jsonl, append_jsonl
 
@@ -13,6 +15,7 @@ IN = DATA / 'articles.jsonl'
 HOT = DATA / 'hot_candidates.json'
 OUT = DATA / 'drafts.jsonl'
 PROCESSED = DATA / 'processed_articles.jsonl'
+SIMILAR_DAYS = int(os.getenv('DRAFT_SIMILAR_LOOKBACK_DAYS', '3'))
 
 
 def llm_prompt(article_text, max_chars, target_format='brief'):
@@ -155,6 +158,110 @@ def parse_json_text(s):
         raise ValueError('JSON not found')
     return json.loads(m.group(0))
 
+BAD_PHRASES = [
+    '접속 실패', '접근 실패', '접근 차단', '접근 제한', '접근거부', '접근 거부',
+    '오류', '서버 오류', '연결 실패', '로봇 체크', '요청하신 페이지를 찾을 수 없습니다',
+    '모더레이션', 'mod_security', '차단', '차단됨', '서버 오류 발생', '자동화 방지',
+    '보안 차단', '접근이 차단', '로봇 인증', 'captcha', '캡차', 'bot check', '접근이 거부'
+]
+
+
+def is_blocked_raw(row):
+    txt = ((row.get('source_title') or '') + (row.get('text') or '') + (row.get('url') or '') +
+           (row.get('resolved_url') or '') + (row.get('final_url') or '') + (row.get('body') or '')).lower()
+    if '블룸버그' in txt or 'bloomberg' in txt:
+        return False
+    return any((p in txt) for p in BAD_PHRASES)
+
+
+def normalize_candidates(rows):
+    return [r for r in rows if not is_blocked_raw(r)]
+
+
+
+
+
+def _norm_kr_text(s):
+    s = (s or '').lower()
+    s = re.sub(r'[^a-zA-Z0-9가-힣\s]', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def _tokenize(s):
+    return set(_norm_kr_text(s).split())
+
+
+def _similar_enough(text1, text2, threshold=0.82):
+    a = _norm_kr_text(text1)
+    b = _norm_kr_text(text2)
+    if not a or not b:
+        return False
+    return SequenceMatcher(None, a, b).ratio() >= threshold
+
+
+def is_similar_draft(candidate, existing_rows):
+    c_title = candidate.get('title') or candidate.get('source_title') or ''
+    c_body = candidate.get('text') or ''
+    if not c_title and not c_body:
+        return False
+
+    ct = _norm_kr_text(c_title)
+    cb_tokens = _tokenize(c_body) | _tokenize(c_title)
+    for r in existing_rows:
+        e_title = (r.get('title') or '')
+        e_body = (r.get('body') or '')
+        if _similar_enough(ct, (e_title or '').lower()):
+            return True
+        et = _norm_kr_text(e_title)
+        etokens = _tokenize(e_title) | _tokenize(e_body)
+        if cb_tokens and etokens:
+            inter = len(cb_tokens & etokens)
+            union = len(cb_tokens | etokens)
+            if union >= 4 and inter / union >= 0.76:
+                return True
+    return False
+
+
+def filter_similar_candidates(rows, existing_rows):
+    seen = set()
+    out = []
+    for r in rows:
+        rid = r.get('url') or r.get('title') or ''
+        if rid in seen:
+            continue
+        seen.add(rid)
+
+        # 제목/본문 유사도로 이미 올라간 기사 건너뜀
+        if is_similar_draft(r, existing_rows):
+            continue
+        out.append(r)
+    return out
+
+def parse_iso_to_dt(s):
+    try:
+        if not s:
+            return None
+        v = str(s).replace('Z', '+00:00')
+        return datetime.fromisoformat(v)
+    except Exception:
+        return None
+
+
+def recent_urls_set(rows, ttl_days):
+    if ttl_days <= 0:
+        return set()
+    now = datetime.now()
+    cut = now - timedelta(days=ttl_days)
+    out = set()
+    for r in rows:
+        if (r.get('status') or '') != 'ok':
+            continue
+        dt = parse_iso_to_dt(r.get('ts'))
+        if dt and dt >= cut:
+            out.add(r.get('url'))
+    return out
+
 
 def generate_with_provider(provider, prompt):
     if provider == 'anthropic':
@@ -168,7 +275,18 @@ def generate_with_provider(provider, prompt):
 
 def main(limit=30):
     rows = read_jsonl(IN)
-    done = set((r.get('url') or '') for r in read_jsonl(PROCESSED) if r.get('status') == 'ok')
+    drafted_rows = read_jsonl(OUT)
+    drafted_urls = {
+        (r.get('url') or '') for r in drafted_rows
+        if (r.get('status') or '').lower() in ('draft', 'queued', 'archived', 'published', 'posted')
+    }
+
+    processed_rows = read_jsonl(PROCESSED)
+    processed_ttl_days = int(os.getenv('PROCESSED_TTL_DAYS', '0'))
+    # 기본은 이전 동작 유지(이미 발행/완료로 처리된 기사 재생성 방지)
+    # TTL>0이면 최근 기간 내 'ok'만 제외
+    done_recent = recent_urls_set(processed_rows, processed_ttl_days)
+    allow_retry = os.getenv('ALLOW_REGENERATE_PROCESSED_DRAFTS', '1').strip().lower() in ['1', 'true', 'yes', 'on']
 
     hot_only = os.getenv('HOT_ONLY', '1').strip() in ['1', 'true', 'True', 'yes']
     draft_limit = int(os.getenv('DRAFT_LIMIT', str(limit)))
@@ -177,14 +295,59 @@ def main(limit=30):
         hot = json.loads(HOT.read_text(encoding='utf-8'))
         hot_urls = [x.get('url') for x in hot.get('items', []) if x.get('url')]
         hot_set = set(hot_urls)
-        targets = [r for r in rows if r.get('url') in hot_set and r.get('url') not in done][:draft_limit]
+
+        base = [r for r in rows if r.get('url') in hot_set]
+        base = normalize_candidates(base)
+        fresh = [r for r in base if r.get('url') not in done_recent]
+        if allow_retry:
+            targets = fresh[:draft_limit]
+            if len(targets) < draft_limit:
+                # TTL 내 중복 제외한 나머지까지 보강
+                remain = []
+                used = set((r.get('url') or '') for r in targets)
+                for r in base:
+                    url = r.get('url') or ''
+                    if url in used:
+                        continue
+                    if url in done_recent:
+                        remain.append(r)
+                    if len(targets) + len(remain) >= draft_limit:
+                        break
+                targets.extend(remain[:max(0, draft_limit - len(targets))])
+        else:
+            targets = fresh[:draft_limit]
     else:
-        targets = [r for r in rows if r.get('url') and r.get('url') not in done][:draft_limit]
+        fresh_all = [r for r in rows if r.get('url') and r.get('url') not in done_recent]
+        fresh_all = normalize_candidates(fresh_all)
+        if allow_retry:
+            targets = fresh_all[:draft_limit]
+        else:
+            targets = fresh_all[:draft_limit]
+
+    # 기존 큐/기존 초안/발행 히스토리 URL 중복 제거
+    targets = [r for r in targets if (r.get('url') or '') not in drafted_urls]
+
+    # 최근 생성 성공본(lookback)과의 유사도 중복도 차단
+    recent_ok_urls = recent_urls_set(processed_rows, SIMILAR_DAYS)
+    recent_article_rows = [
+        {
+            'title': (r.get('source_title') or ''),
+            'body': (r.get('text') or ''),
+            'url': (r.get('url') or ''),
+        }
+        for r in rows
+        if (r.get('url') or '') in recent_ok_urls
+    ]
+
+    # archived/draft/queued/published 및 최근 생성본과 유사한 후보 제거
+    similarity_base = drafted_rows + recent_article_rows
+    targets = filter_similar_candidates(targets, similarity_base)
 
     provider = os.getenv('GEN_PROVIDER', 'openai').lower()
     # explicit writer mode: GEN_PROVIDER=writer
     max_chars = int(os.getenv('DRAFT_MAX_CHARS', '250'))
     ok = 0
+    recent_generated = []
 
     format_cycle = ['prep', 'pas', 'listicle', 'whyhow', 'brief', 'insight']
 
@@ -207,6 +370,8 @@ def main(limit=30):
             obj = parse_json_text(raw)
             title = (obj.get('title') or '').strip()[:28]
             body = (obj.get('body') or '').strip()
+            if is_blocked_raw({'source_title': title, 'text': body}):
+                raise ValueError('blocked content pattern')
             # 해시태그 제거 정책
             body = '\n'.join([ln for ln in body.split('\n') if not ln.strip().startswith('#')]).strip()
             import re
@@ -214,6 +379,11 @@ def main(limit=30):
             body = body[:max_chars]
             if not title or not body:
                 raise ValueError('empty title/body')
+
+            # 생성본이 기존/최근 생성본과 유사하면 건너뜀
+            candidate_preview = {'title': title, 'body': body}
+            if is_similar_draft(candidate_preview, drafted_rows + recent_generated):
+                raise ValueError('duplicate-like draft content')
 
             fmt = (obj.get('format') or '').strip().lower()
             if fmt not in ['prep', 'pas', 'listicle', 'whyhow', 'brief', 'insight']:
@@ -230,6 +400,7 @@ def main(limit=30):
                 'provider': used_provider,
                 'status': 'draft'
             })
+            recent_generated.append({'title': title, 'body': body})
             append_jsonl(PROCESSED, {'ts': now_iso(), 'url': url, 'status': 'ok', 'provider': used_provider, 'format': fmt})
             ok += 1
         except Exception as e:

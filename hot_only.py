@@ -112,6 +112,29 @@ def relevance_score(text, title, include_keywords):
     return min(1.0, hits / max(1, min(len(include_keywords), 6)))
 
 
+
+
+BAD_PHRASES = [
+    '접속 실패', '접근 실패', '접근 차단', '접근 제한', '접근거부', '접근 거부',
+    '서버 오류', '연결 실패', '로봇 체크', '요청하신 페이지를 찾을 수 없습니다',
+    '모더레이션', 'mod_security', '차단됨', '서버 오류 발생', '자동화 방지',
+    '보안 차단', '접근이 차단', '로봇 인증', 'captcha', '캡차', '접근이 거부',
+    'access denied', 'forbidden', 'just a moment', 'verify you are human'
+]
+
+
+def is_blocked_raw_row(r):
+    txt = normalize_text((r.get('source_title') or '') + ' ' + (r.get('text') or '') + ' ' + (r.get('url') or '')).lower()
+    if '블룸버그' in txt or 'bloomberg' in txt:
+        return False
+
+    # 과필터링 방지: 단일 단어(예: "오류", "차단")만으로는 제외하지 않음.
+    if any(p in txt for p in BAD_PHRASES):
+        return True
+
+    return bool(re.search(r'(error\s*\d{3}|http\s*\d{3}|access\s+denied|not\s+found|forbidden)', txt))
+
+
 def build_buzz_models(rows):
     # 전체에서 자주 등장하는 신호어
     token_freq = Counter()
@@ -170,6 +193,7 @@ def main(top_n=TOP_N):
     token_freq, topic_rows = build_buzz_models(rows)
 
     scored = []
+    rows = [r for r in rows if not is_blocked_raw_row(r)]
     for r in rows:
         score, breakdown = score_row(r, include_keywords, token_freq, topic_rows)
         if score < HOT_MIN_SCORE:

@@ -25,7 +25,12 @@ def main():
 
     now = datetime.datetime.now()
     today = str(now.date())
-    limit = int(os.getenv('DAILY_PUBLISH_LIMIT', '2'))
+    # 한도 정책: 0 또는 음수면 무제한 모드
+    env_limit = int(os.getenv('DAILY_PUBLISH_LIMIT', '11').strip() or 0)
+    if env_limit <= 0:
+        limit = 10**9
+    else:
+        limit = env_limit
 
     if state.get('date') != today:
         state = {'date': today, 'count': 0}
