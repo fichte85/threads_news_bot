@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, subprocess, datetime
+from pathlib import Path
 from common import DATA, read_json, write_json, update_json_locked
 
 QUEUE = DATA / 'publish_queue.json'
