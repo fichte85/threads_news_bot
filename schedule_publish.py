@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, subprocess, datetime
-from common import DATA, read_json, write_json
+from common import DATA, read_json, write_json, update_json_locked
 
 QUEUE = DATA / 'publish_queue.json'
 STATE = DATA / 'publish_state.json'
@@ -44,8 +44,13 @@ def main():
     news_handle = os.getenv('NEWS_THREADS_OWN_HANDLE', '').replace('@', '').strip()
     draft = head.get('text', '').strip()
     if not draft:
-        q['items'] = items[1:]
-        write_json(QUEUE, q)
+        def _pop_empty(cur):
+            cur_items = cur.get('items', [])
+            if cur_items and str(cur_items[0].get('id')) == str(head.get('id')):
+                cur['items'] = cur_items[1:]
+            return cur
+
+        update_json_locked(QUEUE, {'items': []}, _pop_empty)
         print('SKIP_EMPTY_DRAFT')
         return
 
@@ -57,8 +62,13 @@ def main():
     r = subprocess.run(cmd, cwd='/home/ubuntu/threads-bot', env=env, capture_output=True, text=True)
     print(r.stdout[-400:])
     if r.returncode == 0:
-        q['items'] = items[1:]
-        write_json(QUEUE, q)
+        def _pop_published(cur):
+            cur_items = cur.get('items', [])
+            if cur_items and str(cur_items[0].get('id')) == str(head.get('id')):
+                cur['items'] = cur_items[1:]
+            return cur
+
+        update_json_locked(QUEUE, {'items': []}, _pop_published)
         state['count'] = int(state.get('count', 0)) + 1
         write_json(STATE, state)
         print('PUBLISH_OK', head.get('id'))

@@ -1,5 +1,6 @@
 import os, json, datetime
 import hashlib
+import copy
 import fcntl
 from pathlib import Path
 from dotenv import load_dotenv
@@ -78,6 +79,31 @@ def write_json(path, obj):
         tmp = p.with_suffix('.json.tmp')
         tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
         tmp.replace(p)
+    finally:
+        _release_lock(fd)
+
+
+def update_json_locked(path, default, mutator):
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd = _atomic_lock(p)
+    try:
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding='utf-8'))
+            except Exception:
+                data = copy.deepcopy(default)
+        else:
+            data = copy.deepcopy(default)
+
+        out = mutator(data)
+        if out is None:
+            out = data
+
+        tmp = p.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp.replace(p)
+        return out
     finally:
         _release_lock(fd)
 
