@@ -4,6 +4,8 @@ import time
 import json
 import requests
 import subprocess
+import re
+import hashlib
 
 from common import DATA, now_iso, read_jsonl, append_jsonl
 
@@ -135,11 +137,10 @@ def ask_writer(prompt):
         raise RuntimeError(f'writer agent failed: code={proc.returncode} err={err}')
 
     text_out = proc.stdout.strip()
-    # openclaw can prepend log lines (e.g., tool provider warnings), so trim to first JSON object
-    brace = text_out.find('{')
-    if brace < 0:
+    m = re.search(r'\{[\s\S]*\}', text_out)
+    if not m:
         raise RuntimeError('writer agent: no JSON object in output')
-    data = json.loads(text_out[brace:])
+    data = json.loads(m.group(0))
     payloads = data.get('payloads', [])
     if not payloads:
         raise RuntimeError('writer agent: no payloads in response')
@@ -219,7 +220,7 @@ def main(limit=30):
                 fmt = target_format
 
             append_jsonl(OUT, {
-                'id': f"d_{abs(hash(url))}",
+                'id': f"d_{hashlib.sha1(url.encode('utf-8')).hexdigest()[:12]}",
                 'ts': now_iso(),
                 'url': url,
                 'source_title': r.get('source_title', ''),

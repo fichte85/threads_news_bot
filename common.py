@@ -1,4 +1,6 @@
 import os, json, datetime
+import hashlib
+import fcntl
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -28,11 +30,34 @@ def read_jsonl(path):
     return out
 
 
+
+
+def _atomic_lock(path):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    lock_path = str(path) + '.lock'
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o666)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _release_lock(fd):
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    except Exception:
+        pass
+
 def append_jsonl(path, obj):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open('a', encoding='utf-8') as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + '\n')
+    fd = _atomic_lock(p)
+    try:
+        with p.open('a', encoding='utf-8') as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + '\n')
+    finally:
+        _release_lock(fd)
 
 
 def read_json(path, default):
@@ -48,7 +73,13 @@ def read_json(path, default):
 def write_json(path, obj):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
+    fd = _atomic_lock(p)
+    try:
+        tmp = p.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp.replace(p)
+    finally:
+        _release_lock(fd)
 
 
 def keywords_from_env(name, default=''):
