@@ -59,7 +59,24 @@ def main():
     env['THREADS_CDP_URL'] = os.getenv('NEWS_THREADS_CDP_URL', 'http://127.0.0.1:9223/')
     if news_handle:
         env['THREADS_OWN_HANDLE'] = news_handle
-    r = subprocess.run(cmd, cwd='/home/ubuntu/threads-bot', env=env, capture_output=True, text=True)
+    # node_modules fallback: news2 작업공간 자체에 node_modules가 없어도 bot1 모듈 공유 경로를 사용
+    nm_candidates = [
+        '/home/ubuntu/threads-bot/node_modules',
+        '/home/ubuntu/threads-bot-news2/node_modules',
+    ]
+    node_path = env.get('NODE_PATH', '')
+    for np in nm_candidates:
+        if Path(np).exists():
+            if node_path:
+                node_path = f"{np}:{node_path}"
+            else:
+                node_path = np
+            break
+    if node_path:
+        env['NODE_PATH'] = node_path
+
+    # 실행 경로를 스크립트 위치로 맞춰 모듈 탐색 기준 일치화
+    r = subprocess.run(cmd, cwd='/home/ubuntu/threads-bot-news2', env=env, capture_output=True, text=True)
     print(r.stdout[-400:])
     if r.returncode == 0:
         def _pop_published(cur):
