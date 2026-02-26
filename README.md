@@ -49,3 +49,5 @@ python3 watcher_bot.py
 ## 비고
 - 발행은 `THREADS_PUBLISH_JS`(news2 전용 `publish_news2.js`)를 호출해 수행.
 - 승인(pick)된 항목만 발행됨.
+- `generate_drafts.py`는 `GEN_PROVIDER=writer`일 때 OpenClaw 에이전트 `writer(시드)`를 직접 호출해 초안을 생성함.
+  - `.env`에서 `GEN_PROVIDER`를 `openai/anthropic/gemini`로 바꾸면 기존 방식으로 동작

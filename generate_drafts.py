@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-import os, time, json, requests
+import os
+import time
+import json
+import requests
+import subprocess
+
 from common import DATA, now_iso, read_jsonl, append_jsonl
 
 IN = DATA / 'articles.jsonl'
@@ -107,6 +112,41 @@ def ask_gemini(prompt):
     raise last_err or RuntimeError('Gemini request failed')
 
 
+def ask_writer(prompt):
+    """Generate via OpenClaw 'writer' agent (에이전트 시드)."""
+    # writer는 로컬 에이전트 실행 플래그로 호출해 API 키/토큰 의존성에서 벗어나도록 구성
+    cmd = [
+        'openclaw', 'agent',
+        '--agent', 'writer',
+        '--local',
+        '--json',
+        '--message', prompt,
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd='/home/ubuntu/.openclaw',
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=180,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or '').strip()[:500]
+        raise RuntimeError(f'writer agent failed: code={proc.returncode} err={err}')
+
+    text_out = proc.stdout.strip()
+    # openclaw can prepend log lines (e.g., tool provider warnings), so trim to first JSON object
+    brace = text_out.find('{')
+    if brace < 0:
+        raise RuntimeError('writer agent: no JSON object in output')
+    data = json.loads(text_out[brace:])
+    payloads = data.get('payloads', [])
+    if not payloads:
+        raise RuntimeError('writer agent: no payloads in response')
+    text = payloads[0].get('text', '')
+    return text
+
+
 def parse_json_text(s):
     import json, re
     m = re.search(r'\{[\s\S]*\}', s)
@@ -120,6 +160,8 @@ def generate_with_provider(provider, prompt):
         return ask_anthropic(prompt), provider
     if provider == 'gemini':
         return ask_gemini(prompt), provider
+    if provider == 'writer':
+        return ask_writer(prompt), 'writer'
     return ask_openai(prompt), 'openai'
 
 
@@ -139,6 +181,7 @@ def main(limit=30):
         targets = [r for r in rows if r.get('url') and r.get('url') not in done][:draft_limit]
 
     provider = os.getenv('GEN_PROVIDER', 'openai').lower()
+    # explicit writer mode: GEN_PROVIDER=writer
     max_chars = int(os.getenv('DRAFT_MAX_CHARS', '250'))
     ok = 0
 
@@ -153,7 +196,7 @@ def main(limit=30):
             try:
                 raw, used_provider = generate_with_provider(provider, prompt)
             except Exception as e:
-                # OpenAI 429 등 레이트리밋 시 Gemini로 1회 폴백
+                # OpenAI 429 등 레이트리밋 시 Gemini로 1회 폴백 (writer 모드는 폴백하지 않음)
                 if provider == 'openai' and '429' in str(e) and os.getenv('GEMINI_API_KEY', ''):
                     time.sleep(1.2)
                     raw, used_provider = generate_with_provider('gemini', prompt)
