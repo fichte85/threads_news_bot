@@ -1,0 +1,13 @@
+[Unit]
+Description=News2 extract quality daily report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/threads-bot-news2
+EnvironmentFile=/home/ubuntu/threads-bot-news2/.env
+# 기본 1일치, 텔레그램 전송 비활성(원하면 .env에서 EXTRACT_REPORT_TO_TELEGRAM=1)
+Environment=EXTRACT_REPORT_DAYS=1
+Environment=EXTRACT_REPORT_TO_TELEGRAM=0
+ExecStart=/usr/bin/python3 /home/ubuntu/threads-bot-news2/report_extract_quality.py

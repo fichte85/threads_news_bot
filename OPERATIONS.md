@@ -134,7 +134,14 @@
 
 ---
 
-## 9) 잡담 운영
+## 9) 추출 품질 데일리 리포트
+- 스크립트: `report_extract_quality.py`
+- 기본 스케줄: 매일 00:05 KST (`deploy/systemd/news2-extract-quality-report.timer`)
+- 리포트 위치: `data/reports/extract_quality_YYYY-MM-DD.txt`
+- 주요 지표: `targets`, `ok`, `skip_short`, `skip_mismatch`, `error`, `duplicate`, 비유입률
+- 텔레그램 전송: `.env`에서 `EXTRACT_REPORT_TO_TELEGRAM=1` 설정
+
+## 10) 잡담 운영
 - 자동 잡담 삽입은 옵션
 - 수동 개입 트리거 문구: **"뉴스 봇에 잡담 넣어줘"**
 - 이 문구 수신 시, 큐 맥락에 맞춰 수동 잡담 작성/삽입

@@ -231,40 +231,55 @@ def merge_with_chat_schedule(news_items, chat_items, start_from=None):
     return merged
 
 
+def _extract_short_topic(text, limit=3):
+    t = (text or '').lower()
+    t = re.sub(r'[^0-9a-z가-힣 ]', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    stop = {
+        'the', 'a', 'an', 'of', 'to', 'in', 'for', 'and', 'on', 'at', 'is', 'are', 'was', 'were',
+        'this', 'that', 'it', 'as', 'by', 'with', 'from', 'today', 'news', 'latest', 'yesterday', 'market',
+        'economy', 'tech', 'report', 'update', 'breaking', 'update',
+    }
+    words = []
+    for w in t.split():
+        if len(w) <= 1 or w in stop:
+            continue
+        words.append(w)
+    out = []
+    for w in words:
+        if w not in out:
+            out.append(w)
+    return out[:limit]
+
+
+
+def _topic_category(words):
+    if not words:
+        return '핵심이슈'
+    return words[0]
+
+
 def make_chitchat(seed_text=''):
+    """뉴스 본문을 노출하지 않는 초월형 잡담 생성기.
+    차분/간결/유머/전략형 톤을 고정."""
+    seed_bits = seed_text or ''
+
     pool = [
-        '요즘은 빠르게 만들고 작게 검증하는 루틴이 제일 효율적이네요. 오늘도 작은 실험 하나 추가합니다.',
-        '뉴스를 많이 보는 것보다, 내 일에 바로 연결되는 한 줄 인사이트를 남기는 게 더 중요하더라고요.',
-        '자동화는 화려함보다 안정성이 먼저인 것 같아요. 천천히 굴려도 끊기지 않는 게 결국 이깁니다.',
-        '오늘도 기록 하나 남깁니다. 방향이 맞으면 속도는 나중에 자연스럽게 붙더라고요.',
-        'AI는 결국 도구고, 결과를 만드는 건 운영 루틴이더라고요. 오늘도 실행 기준으로 가봅니다.',
+        '좋아요, 오늘은 리듬 맞추기 모드.',
+        '무리하지 말고, 속도보다 방향을 먼저 맞춥시다.',
+        '세상은 급해도, 판단은 천천히 정확하게.',
+        '짧은 정리가 가장 강한 전략이 될 때가 있습니다.',
+        '큰 소음보다 작은 일관성이 오래 갑니다.',
+        '루틴이 깔끔하면 변수가 많아도 흔들림이 줄어요.',
+        '딴 건 잠시 멈추고, 지금 할 일 한 가지만 확정합시다.',
+        '정보는 산더미여도, 실행은 한 칸씩.',
+        '오늘의 결론: 과잉 반응은 금방 식고, 기록은 남는다.',
+        '운이 아니라 설계로 가야 길어지는 흐름이 생깁니다.',
     ]
-    idx = abs(hash(seed_text or str(datetime.datetime.now()))) % len(pool)
+
+    idx = abs(hash(seed_bits or str(datetime.datetime.now()))) % len(pool)
     return pool[idx]
 
-
-
-
-
-def set_mix_mode(enabled: bool):
-    val = '1' if enabled else '0'
-    os.environ['MIX_CHAT_ENABLED'] = val
-
-    p = DATA.parent / '.env'
-    try:
-        txt = p.read_text(encoding='utf-8')
-    except Exception:
-        txt = ''
-    lines = txt.splitlines()
-    updated = False
-    for i, ln in enumerate(lines):
-        if ln.startswith('MIX_CHAT_ENABLED='):
-            lines[i] = f'MIX_CHAT_ENABLED={val}'
-            updated = True
-            break
-    if not updated:
-        lines.append(f'MIX_CHAT_ENABLED={val}')
-    p.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
 def parse_queue_dt(v):

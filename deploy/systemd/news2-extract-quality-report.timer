@@ -1,0 +1,10 @@
+[Unit]
+Description=Run News2 extract quality report daily at 00:05 KST (15:05 UTC)
+
+[Timer]
+OnCalendar=*-*-* 15:05:00 UTC
+Persistent=true
+Unit=news2-extract-quality-report.service
+
+[Install]
+WantedBy=timers.target

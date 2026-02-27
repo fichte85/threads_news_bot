@@ -46,6 +46,35 @@ python3 watcher_bot.py
 - `data/publish_queue.json`
 - `data/news2.log`
 
+## 추출 품질 리포트
+- 스크립트: `report_extract_quality.py`
+- 입력:
+  - `data/processed_news_links.jsonl`
+  - `data/extract_debug.jsonl` (보조)
+- 출력:
+  - `data/reports/extract_quality_YYYY-MM-DD.txt`
+  - `data/reports/extract_quality_latest.txt`
+
+### 환경변수
+- `EXTRACT_REPORT_DAYS` (기본 `1`)
+- `EXTRACT_REPORT_TO_TELEGRAM` (`0/1`, 기본 `0`)
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 재사용
+
+### 수동 실행
+```bash
+cd /home/ubuntu/threads-bot-news2
+EXTRACT_REPORT_DAYS=1 EXTRACT_REPORT_TO_TELEGRAM=0 python3 report_extract_quality.py
+```
+
+### systemd timer 설치 예시 (매일 00:05 KST)
+```bash
+sudo cp deploy/systemd/news2-extract-quality-report.service /etc/systemd/system/
+sudo cp deploy/systemd/news2-extract-quality-report.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now news2-extract-quality-report.timer
+systemctl list-timers | grep news2-extract-quality-report
+```
+
 ## 비고
 - 발행은 `THREADS_PUBLISH_JS`(news2 전용 `publish_news2.js`)를 호출해 수행.
 - 승인(pick)된 항목만 발행됨.
