@@ -1,10 +1,77 @@
 #!/usr/bin/env python3
-import os, subprocess, datetime
+import os, subprocess, datetime, json
+import urllib.request
 from pathlib import Path
 from common import DATA, read_json, write_json, update_json_locked
 
 QUEUE = DATA / 'publish_queue.json'
 STATE = DATA / 'publish_state.json'
+
+
+def send_telegram(msg: str) -> bool:
+    token = (os.getenv('TELEGRAM_BOT_TOKEN') or '').strip()
+    chat_id = (os.getenv('TELEGRAM_CHAT_ID') or '').strip()
+    if not token or not chat_id:
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        'chat_id': chat_id,
+        'text': msg,
+        'disable_web_page_preview': True,
+    }
+
+    # 최소 의존성 우선: urllib 사용, 실패 시 requests fallback
+    try:
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={'Content-Type': 'application/json; charset=utf-8'},
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            if 200 <= int(getattr(resp, 'status', 0) or 0) < 300:
+                return True
+    except Exception as e:
+        print(f'TG_NOTIFY_WARN urllib: {str(e)[:180]}')
+
+    try:
+        import requests  # type: ignore
+        rr = requests.post(url, json=payload, timeout=8)
+        if rr.ok:
+            return True
+        print(f'TG_NOTIFY_WARN requests: HTTP {rr.status_code} {rr.text[:180]}')
+    except Exception as e:
+        print(f'TG_NOTIFY_WARN requests: {str(e)[:180]}')
+
+    return False
+
+
+def _fmt_ok_msg(head: dict, now: datetime.datetime) -> str:
+    lines = [
+        '✅ [뉴스봇2 발행] OK',
+        f"- id: {head.get('id', '-')}",
+        f"- when: {head.get('when') or now.strftime('%Y-%m-%d %H:%M')}",
+    ]
+    title = (head.get('title') or '').strip()
+    if title:
+        lines.append(f'- title: {title}')
+    url = (head.get('url') or '').strip()
+    if url:
+        lines.append(f'- url: {url}')
+    return '\n'.join(lines)
+
+
+def _fmt_err_msg(head: dict, now: datetime.datetime, stderr_text: str) -> str:
+    err = (stderr_text or '').strip().replace('\n', ' ')
+    err = err[:280] if err else '-'
+    return '\n'.join([
+        '❌ [뉴스봇2 발행] ERR',
+        f"- id: {head.get('id', '-')}",
+        f"- when: {head.get('when') or now.strftime('%Y-%m-%d %H:%M')}",
+        f'- stderr: {err}',
+    ])
 
 
 def main():
@@ -96,8 +163,17 @@ def main():
         state['count'] = int(state.get('count', 0)) + 1
         write_json(STATE, state)
         print('PUBLISH_OK', head.get('id'))
+        try:
+            send_telegram(_fmt_ok_msg(head, now))
+        except Exception as e:
+            print(f'TG_NOTIFY_WARN ok: {str(e)[:180]}')
     else:
-        print('PUBLISH_ERR', r.stderr[-300:])
+        err_tail = (r.stderr or '')[-300:]
+        print('PUBLISH_ERR', err_tail)
+        try:
+            send_telegram(_fmt_err_msg(head, now, err_tail))
+        except Exception as e:
+            print(f'TG_NOTIFY_WARN err: {str(e)[:180]}')
 
 
 if __name__ == '__main__':
