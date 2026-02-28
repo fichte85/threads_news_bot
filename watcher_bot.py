@@ -33,6 +33,55 @@ background_jobs = {}
 # 혼합 모드 단기 자동해제(메모리 카운터)
 MIX_AUTO_OFF_REMAIN = 0
 
+SENSITIVE_PATTERNS = [
+    ('auth_header', re.compile(r'authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._\-]{8,}', re.IGNORECASE)),
+    ('bearer_token', re.compile(r'\bbearer\s+[A-Za-z0-9._\-]{8,}', re.IGNORECASE)),
+    ('api_key_wording', re.compile(r'\b(?:token|api(?:[_-]?key)?|access\s*key|secret\s*key)\b\s*[:=]?\s*[A-Za-z0-9._\-/]{8,}', re.IGNORECASE)),
+    ('query_key_token', re.compile(r'[?&](?:token|access_token|id_token|auth|authorization|api(?:[_-]?key)?|key|secret|sig|signature|session(?:id)?|code)=[^\s&#]{8,}', re.IGNORECASE)),
+    ('prefix_sk', re.compile(r'\bsk-[A-Za-z0-9]{10,}\b')),
+    ('prefix_xoxb', re.compile(r'\bxoxb-[A-Za-z0-9-]{10,}\b')),
+    ('prefix_ghp', re.compile(r'\bghp_[A-Za-z0-9]{10,}\b')),
+    ('prefix_akia', re.compile(r'\bAKIA[0-9A-Z]{16}\b')),
+    ('prefix_aiza', re.compile(r'\bAIza[0-9A-Za-z\-_]{20,}\b')),
+    ('prefix_ya29', re.compile(r'\bya29\.[0-9A-Za-z\-_]+\b')),
+    ('email', re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')),
+    ('phone_kr', re.compile(r'\b(?:\+?82[-\s]?)?0?1[016789][-\s]?\d{3,4}[-\s]?\d{4}\b')),
+    ('long_handle', re.compile(r'(?<!\w)@[A-Za-z0-9_.-]{12,}')),
+    ('url_query_suspect', re.compile(r'https?://[^\s?#]+\?[^\s]{20,}(?:token|access_token|id_token|auth|api(?:[_-]?key)?|key|secret|sig|code)', re.IGNORECASE)),
+]
+
+SAFE_CHAT_FALLBACK = '민감정보가 감지되어 내용을 일반화했어요. 이 이슈에서 어떤 관점이 가장 중요하다고 보세요?'
+SAFE_REWRITE_FALLBACK = '민감정보 보호 정책에 따라 내용을 일반화했습니다. 핵심 이슈와 공개 가능한 사실 중심으로 다시 정리해 주세요.'
+
+
+def detect_sensitive_pattern(text):
+    txt = str(text or '')
+    for name, pattern in SENSITIVE_PATTERNS:
+        if pattern.search(txt):
+            return name
+    return None
+
+
+def sanitize_generated_text(text, *, context, regenerate_fn=None, max_retries=2, fallback_text=''):
+    """생성 직후 민감정보 패턴을 차단한다. initial + max_retries(최대 2회) 후 fallback."""
+    current = str(text or '').strip()
+    attempt = 0
+    while True:
+        pattern_name = detect_sensitive_pattern(current)
+        if not pattern_name:
+            return current
+
+        print(f"reason=sensitive-block:pattern={pattern_name} context={context} attempt={attempt}")
+        if regenerate_fn is not None and attempt < max_retries:
+            attempt += 1
+            try:
+                current = str(regenerate_fn(attempt, pattern_name) or '').strip()
+                continue
+            except Exception as e:
+                print(f"reason=sensitive-block:pattern=regenerate-error context={context} error={str(e)[:120]}")
+        print(f"reason=sensitive-block:pattern={pattern_name} context={context} action=fallback")
+        return fallback_text or ''
+
 
 def send(text):
     if not TOKEN or not CHAT_ID:
@@ -259,26 +308,164 @@ def _topic_category(words):
     return words[0]
 
 
-def make_chitchat(seed_text=''):
-    """뉴스 본문을 노출하지 않는 초월형 잡담 생성기.
-    차분/간결/유머/전략형 톤을 고정."""
-    seed_bits = seed_text or ''
+def _keyword_topics(text, limit=4):
+    words = _extract_short_topic(text or '', limit=limit * 2)
+    ban = {
+        '지금', '오늘', '이번', '관련', '대한', '통해', '정도', '이후', '최근', '가장', '정리',
+        '한국', '미국', '중국', '시장', '정책', '발표', '가능성', '이슈', '핵심',
+    }
+    topics = []
+    for w in words:
+        if len(w) <= 1 or w in ban:
+            continue
+        if w not in topics:
+            topics.append(w)
+    return topics[:limit]
 
-    pool = [
-        '좋아요, 오늘은 리듬 맞추기 모드.',
-        '무리하지 말고, 속도보다 방향을 먼저 맞춥시다.',
-        '세상은 급해도, 판단은 천천히 정확하게.',
-        '짧은 정리가 가장 강한 전략이 될 때가 있습니다.',
-        '큰 소음보다 작은 일관성이 오래 갑니다.',
-        '루틴이 깔끔하면 변수가 많아도 흔들림이 줄어요.',
-        '딴 건 잠시 멈추고, 지금 할 일 한 가지만 확정합시다.',
-        '정보는 산더미여도, 실행은 한 칸씩.',
-        '오늘의 결론: 과잉 반응은 금방 식고, 기록은 남는다.',
-        '운이 아니라 설계로 가야 길어지는 흐름이 생깁니다.',
+
+def _topic_phrase(seed_text='', prev_text='', next_text=''):
+    merged = ' '.join([seed_text or '', prev_text or '', next_text or '']).strip()
+    topics = _keyword_topics(merged, limit=3)
+    if not topics:
+        return '이 흐름'
+    if len(topics) == 1:
+        return topics[0]
+    return f"{topics[0]}·{topics[1]}"
+
+
+def _emotion_level(seed_text=''):
+    t = (seed_text or '').lower()
+    hard = ['하락', '급락', '충격', '리스크', '전쟁', '규제', '위기', '불안', '분쟁', '실적부진', '악화']
+    bright = ['상승', '호재', '기대', '회복', '돌파', '확대', '개선', '신기록', '반등']
+    hard_score = sum(1 for k in hard if k in t)
+    bright_score = sum(1 for k in bright if k in t)
+    if hard_score >= 2:
+        return 'low'
+    if bright_score >= 2:
+        return 'high'
+    return 'mid'
+
+
+def _shape_text_len(text, level='mid'):
+    # low: 차분/짧게, high: 에너지 조금 높게, mid: 기본
+    if not text:
+        return text
+    target = {'low': 120, 'mid': 145, 'high': 165}.get(level, 145)
+    t = re.sub(r'\s+', ' ', text).strip()
+    if len(t) <= target:
+        return t
+    cut = t[:target].rstrip(' ,.;')
+    # 문장 끝 정리
+    if not re.search(r'[.!?…]$', cut):
+        cut += '…'
+    return cut
+
+
+def _is_too_similar(cand, existing_texts):
+    c = re.sub(r'\s+', ' ', (cand or '').strip())
+    if not c:
+        return True
+    c_words = set(c.split())
+    for ex in existing_texts or []:
+        e = re.sub(r'\s+', ' ', str(ex).strip())
+        if not e:
+            continue
+        if c == e:
+            return True
+        e_words = set(e.split())
+        if not e_words:
+            continue
+        overlap = len(c_words & e_words) / max(1, min(len(c_words), len(e_words)))
+        if overlap >= 0.78:
+            return True
+    return False
+
+
+def make_chitchat(seed_text='', recent_texts=None, prev_news_text='', next_news_text='', force_question=None):
+    """뉴스 주제/감정에 반응하는 공감형 잡담 생성기.
+    - 뉴스 문맥 키워드 반영(맥락 불일치 완화)
+    - 질문형 비율 강제(저관여 문장 방지)
+    - 감정 레벨/문장 길이 자동 보정
+    - 유사도 기반 중복 회피"""
+    seed_bits = seed_text or ''
+    recent_texts = recent_texts or []
+
+    warmth = (os.getenv('CHAT_WARMTH', 'high') or 'high').strip().lower()  # low|mid|high
+    ask_ratio = float(os.getenv('CHAT_QUESTION_RATIO', '0.88') or 0.88)
+    ask_ratio = min(1.0, max(0.0, ask_ratio))
+
+    topic = _topic_phrase(seed_text, prev_news_text, next_news_text)
+    emo = _emotion_level(' '.join([seed_text or '', prev_news_text or '', next_news_text or '']))
+
+    empathy_openers = {
+        'low': [
+            f'{topic} 이슈라 마음이 좀 무거울 수 있어요.',
+            f'{topic} 얘기는 체감 피로도가 꽤 높죠.',
+            f'{topic} 흐름 보니 신중하게 보는 게 맞아 보여요.',
+        ],
+        'mid': [
+            f'{topic} 쪽이 지금 흐름을 꽤 좌우하네요.',
+            f'{topic} 포인트는 그냥 지나치기 어렵죠.',
+            f'{topic} 이슈, 생각보다 파급이 길어질 수 있겠어요.',
+        ],
+        'high': [
+            f'{topic} 흐름, 생각보다 재밌게 전개되네요.',
+            f'{topic} 건은 분위기 전환 신호로 보이기도 해요.',
+            f'{topic} 이슈가 판을 살짝 바꾸는 느낌이에요.',
+        ],
+    }
+
+    bodies = {
+        'low': [
+            '지금은 단정하기보다, 리스크가 어디에 쌓이는지 먼저 보는 편이 안전해요.',
+            '속도보다 방향 확인이 더 중요해 보여요.',
+            '한 번에 결론내리기보다 신호를 한두 개 더 확인하는 게 좋아요.',
+        ],
+        'mid': [
+            '핵심은 숫자보다 의도와 지속 가능성 같아요.',
+            '표면 뉴스보다 다음 선택지가 어떻게 바뀌는지가 더 중요해요.',
+            '당장 결과보다 구조 변화 쪽이 오래 남는 포인트예요.',
+        ],
+        'high': [
+            '이번엔 단기 반응보다 중기 시나리오를 같이 보는 게 더 재밌어요.',
+            '한 번의 이벤트보다 누적 신호가 더 크게 작동할 수 있어요.',
+            '오히려 이런 구간에서 관점 차이가 확실히 드러나요.',
+        ],
+    }
+
+    questions = [
+        f'당신은 {topic} 이슈에서 지금 가장 먼저 봐야 할 포인트를 뭐로 봐요?',
+        f'{topic} 관련해서, 단기 반응이랑 구조 변화 중 어디에 더 무게를 둘래요?',
+        f'이 흐름에서 한 가지 지표만 고른다면 뭘 체크하겠어요?',
+        f'지금 판단을 바꿀 수 있는 신호가 하나 더 나온다면 어떤 종류일까요?',
     ]
 
-    idx = abs(hash(seed_bits or str(datetime.datetime.now()))) % len(pool)
-    return pool[idx]
+    closers = [
+        '서두르지 말고, 핵심 신호 한두 개만 붙잡고 가도 충분해요.',
+        '작게 정리해도 좋아요. 관점을 유지하는 게 이기는 방법이니까요.',
+        '결론을 늦추는 것도 전략이에요. 지금은 그게 더 현실적일 수 있어요.',
+    ]
+
+    key = warmth if warmth in empathy_openers else 'mid'
+    base = abs(hash(seed_bits or str(datetime.datetime.now())))
+
+    def pick(pool, salt):
+        return pool[(base + salt) % len(pool)]
+
+    candidates = []
+    for i in range(14):
+        opener = pick(empathy_openers.get(emo, empathy_openers[key]), i)
+        body = pick(bodies.get(emo, bodies[key]), i * 3 + 1)
+        ask = force_question if force_question is not None else (((base + i) % 100) < int(ask_ratio * 100))
+        tail = pick(questions, i * 5 + 2) if ask else pick(closers, i * 7 + 4)
+        text = _shape_text_len(f"{opener} {body} {tail}", level=emo)
+        candidates.append(text)
+
+    for cand in candidates:
+        if not _is_too_similar(cand, recent_texts):
+            return cand
+
+    return candidates[0]
 
 
 
@@ -355,11 +542,37 @@ def insert_chats_into_queue(count=1):
 
             # 같은 텍스트 반복 방지: 슬롯/시점/순번을 시드에 반영
             base_seed = f"{ptxt[:20]}|{ntx[:20]}|{when}|{idx}|{len(items)}"
-            ctext = make_chitchat(base_seed)
+            ctext = make_chitchat(
+                base_seed,
+                list(existing_chat_texts),
+                prev_news_text=ptxt,
+                next_news_text=ntx,
+                force_question=True,
+            )
             retry = 0
             while ctext in existing_chat_texts and retry < 8:
                 retry += 1
-                ctext = make_chitchat(base_seed + f"|{retry}")
+                ctext = make_chitchat(
+                    base_seed + f"|{retry}",
+                    list(existing_chat_texts),
+                    prev_news_text=ptxt,
+                    next_news_text=ntx,
+                    force_question=True,
+                )
+
+            ctext = sanitize_generated_text(
+                ctext,
+                context=f'chat-insert:slot={idx}:when={when}',
+                regenerate_fn=lambda retry, _pattern: make_chitchat(
+                    base_seed + f"|sensitive|{retry}|{time.time_ns()}",
+                    list(existing_chat_texts),
+                    prev_news_text=ptxt,
+                    next_news_text=ntx,
+                    force_question=True,
+                ),
+                max_retries=2,
+                fallback_text=SAFE_CHAT_FALLBACK,
+            )
 
             items.append({
                 'id': f'chat_{int(time.time())}_{abs(hash(when)) % 10000000}',
@@ -444,7 +657,7 @@ TEMPLATE_HINTS = {
 }
 
 
-def rewrite_with_template(text, template):
+def rewrite_with_template(text, template, attempt=0):
     template = (template or '').strip().lower()
     if template not in TEMPLATE_HINTS:
         raise ValueError('unknown template')
@@ -455,6 +668,10 @@ def rewrite_with_template(text, template):
     if not key:
         raise RuntimeError('GEMINI_API_KEY missing')
 
+    retry_note = ''
+    if int(attempt or 0) > 0:
+        retry_note = '\n- 민감정보(키/토큰/개인식별정보/URL 쿼리 비밀값)로 오해될 수 있는 문자열 절대 금지\n- 이메일/전화번호/@긴계정/Authorization 형식 금지'
+
     prompt = f"""
 다음 Threads 원고를 {TEMPLATE_HINTS[template]}로 재작성해줘.
 조건:
@@ -462,7 +679,7 @@ def rewrite_with_template(text, template):
 - 해시태그 금지
 - {max_chars}자 이내
 - 제목 1줄 + 본문
-- 과장/허위 금지
+- 과장/허위 금지{retry_note}
 
 원문:
 {text}
@@ -496,7 +713,14 @@ def do_rework(arg_text):
 
     item = items[idx - 1]
     try:
-        new_text = rewrite_with_template(item.get('text', ''), template)
+        new_text = rewrite_with_template(item.get('text', ''), template, attempt=0)
+        new_text = sanitize_generated_text(
+            new_text,
+            context=f'rework:idx={idx}:template={template}',
+            regenerate_fn=lambda retry, _pattern: rewrite_with_template(item.get('text', ''), template, attempt=retry),
+            max_retries=2,
+            fallback_text=SAFE_REWRITE_FALLBACK,
+        )
     except Exception as e:
         return f'재작성 실패: {str(e)[:180]}'
 
@@ -560,9 +784,31 @@ def do_pick(id_csv):
         news_count += 1
 
         if mix_enabled and (news_count % mix_every == 0):
+            prev_txt = news_items[-1]['text'] if news_items else ''
+            next_txt = ''
+            chat_text = make_chitchat(
+                d.get('title', ''),
+                [c.get('text','') for c in chat_items],
+                prev_news_text=prev_txt,
+                next_news_text=next_txt,
+                force_question=True,
+            )
+            chat_text = sanitize_generated_text(
+                chat_text,
+                context=f'chat-pick:news_count={news_count}',
+                regenerate_fn=lambda retry, _pattern: make_chitchat(
+                    f"{d.get('title', '')}|pick|{news_count}|{retry}|{time.time_ns()}",
+                    [c.get('text','') for c in chat_items],
+                    prev_news_text=prev_txt,
+                    next_news_text=next_txt,
+                    force_question=True,
+                ),
+                max_retries=2,
+                fallback_text=SAFE_CHAT_FALLBACK,
+            )
             chat_items.append({
                 'id': f"chat_{int(time.time())}_{news_count}",
-                'text': make_chitchat(d.get('title', '')),
+                'text': chat_text,
                 'template': 'chat',
             })
 
